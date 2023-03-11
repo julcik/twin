@@ -44,7 +44,7 @@ def train(max_epochs=1000, seed=42):
         faces=final_faces,
         verts_uvs=runner.verts_uvs,
         faces_uvs=runner.faces_uvs,
-        texture_map=255 * runner.texture_image,
+        texture_map=runner.texture_image,
     )
 
 

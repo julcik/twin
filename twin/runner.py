@@ -151,29 +151,29 @@ class TwinRunner(LightningModule):
 
     def training_step(self, batch: Dict[str, Tensor], batch_idx: int) -> Tensor:
         batch_size = batch["image"].size(0)
-        loss = {k: torch.tensor(0.0, device=self.device) for k in self.losses}
-        if batch_idx == 0:
-            # Deform the mesh
-            self.mesh = self.src_mesh.offset_verts(self.deform_verts)
+        losses_dict = {k: torch.tensor(0.0, device=self.device) for k in self.losses}
 
-            if self.current_epoch >= self.mesh_only_epochs:
-                # self.current_epoch == self.mesh_only_epochs:
-                #     TODO: recreate UV coords with blender
+        # Deform the mesh
+        self.mesh = self.src_mesh.offset_verts(self.deform_verts)
 
-                # Add per vertex colors to texture the mesh
-                # self.mesh.textures = TexturesVertex(
-                #     verts_features=self.sphere_verts_rgb
-                # )
+        if self.current_epoch >= self.mesh_only_epochs:
+            # self.current_epoch == self.mesh_only_epochs:
+            #     TODO: recreate UV coords with blender
 
-                # https://github.com/facebookresearch/pytorch3d/issues/1473
-                self.mesh.textures = TexturesUV(
-                    maps=self.texture_image.unsqueeze(0),
-                    faces_uvs=self.faces_uvs.unsqueeze(0),
-                    verts_uvs=self.verts_uvs.unsqueeze(0),
-                )
+            # Add per vertex colors to texture the mesh
+            # self.mesh.textures = TexturesVertex(
+            #     verts_features=self.sphere_verts_rgb
+            # )
 
-            # Losses to smooth /regularize the mesh shape
-            loss.update(**self.update_mesh_shape_prior_losses(self.mesh))
+            # https://github.com/facebookresearch/pytorch3d/issues/1473
+            self.mesh.textures = TexturesUV(
+                maps=self.texture_image.unsqueeze(0),
+                faces_uvs=self.faces_uvs.unsqueeze(0),
+                verts_uvs=self.verts_uvs.unsqueeze(0),
+            )
+
+        # Losses to smooth /regularize the mesh shape
+        losses_dict.update(**self.update_mesh_shape_prior_losses(self.mesh))
 
         meshes = self.mesh.extend(batch_size)
         cameras = FoVPerspectiveCameras(device=self.device, R=batch["R"], T=batch["T"])
@@ -189,15 +189,15 @@ class TwinRunner(LightningModule):
             # # image from our dataset
             predicted_rgb = images_predicted[..., :3]
             loss_rgb = ((predicted_rgb - batch["image"]) ** 2).mean()
-            loss["rgb"] += loss_rgb
+            losses_dict["rgb"] += loss_rgb
 
         # # Squared L2 distance between the predicted silhouette and the target
         # # silhouette from our dataset
         predicted_silhouette = images_predicted[..., 3:]
         loss_silhouette = ((predicted_silhouette - batch["silhouette"]) ** 2).mean()
-        loss["silhouette"] += loss_silhouette
+        losses_dict["silhouette"] += loss_silhouette
 
-        final_loss = sum([l * self.losses[k]["weight"] for k, l in loss.items()])
+        final_loss = sum([l * self.losses[k]["weight"] for k, l in losses_dict.items()])
 
         # Plot mesh
         if batch_idx == 0 and self.current_epoch % 20 == 0:
@@ -221,7 +221,7 @@ class TwinRunner(LightningModule):
                 faces=final_faces,
                 verts_uvs=self.verts_uvs,
                 faces_uvs=self.faces_uvs,
-                texture_map=255 * self.texture_image,
+                texture_map=self.texture_image,
             )
 
         return final_loss
