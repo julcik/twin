@@ -4,7 +4,7 @@ Main train script
 import torch
 from pytorch3d.io import save_obj
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.callbacks import LearningRateMonitor, TQDMProgressBar
 
 from twin.data.datamodule import TwinDataModule
 from twin.data.synthetic import Synthetic
@@ -16,10 +16,10 @@ def train(max_epochs=1000, seed=42):
     seed_everything(seed, workers=True)
 
     datamodule = TwinDataModule(dataset_cl=Synthetic)
-    runner = TwinRunner()
+    runner = TwinRunner(mesh_only_epochs=max_epochs // 2)
 
     callbacks = [
-        # LearningRateMonitor(),
+        LearningRateMonitor(),
         # ModelCheckpoint(),
         TQDMProgressBar(refresh_rate=20),
     ]
@@ -38,7 +38,14 @@ def train(max_epochs=1000, seed=42):
 
     # Save
     final_verts, final_faces = runner.mesh.get_mesh_verts_faces(0)
-    save_obj("model.obj", final_verts, final_faces)
+    save_obj(
+        "model.obj",
+        verts=final_verts,
+        faces=final_faces,
+        verts_uvs=runner.verts_uvs,
+        faces_uvs=runner.faces_uvs,
+        texture_map=255 * runner.texture_image,
+    )
 
 
 if __name__ == "__main__":
