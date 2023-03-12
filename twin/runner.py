@@ -15,6 +15,7 @@ from pytorch3d.loss import (
 )
 from pytorch3d.renderer import (
     AmbientLights,
+    BlendParams,
     FoVPerspectiveCameras,
     MeshRasterizer,
     MeshRenderer,
@@ -22,16 +23,14 @@ from pytorch3d.renderer import (
     SoftPhongShader,
     SoftSilhouetteShader,
     TexturesUV,
-    TexturesVertex,
     look_at_view_transform,
 )
 from pytorch3d.structures import Meshes
-from pytorch3d.utils import ico_sphere
 from pytorch_lightning import LightningModule
 from torch import Tensor
 from torch.optim import SGD, Optimizer
 
-from twin.utils.mesh import convert_3d_to_uv_coordinates
+from twin.utils.mesh import make_sphere
 
 
 class TwinRunner(LightningModule):
@@ -39,7 +38,7 @@ class TwinRunner(LightningModule):
     Lightning module which describes training process
     """
 
-    def __init__(self, init_shape_level=4, mesh_only_epochs=5, out="./out", **kwargs):
+    def __init__(self, init_shape_level=2, mesh_only_epochs=5, out="./out", **kwargs):
         """
 
         :param args:
@@ -50,72 +49,71 @@ class TwinRunner(LightningModule):
         self.out.mkdir(exist_ok=True)
         self.mesh_only_epochs = mesh_only_epochs
 
-        self.src_mesh = ico_sphere(level=init_shape_level)
+        # Initial mesh - UV sphere
+        self.src_mesh = make_sphere(level=init_shape_level)
         verts_shape = self.src_mesh.verts_packed().shape
 
-        self.mesh: Meshes
-        # We will learn to deform the source mesh by offsetting its vertices
-        # The shape of the deform parameters is equal to the total number of vertices in
-        # src_mesh
+        # Deformed mesh
+        self.mesh: Meshes = None
         self.deform_verts = torch.nn.Parameter(
             torch.full(verts_shape, 0.0), requires_grad=True
         )
 
-        # We will also learn per vertex colors for our sphere mesh that define texture
-        # of the mesh
-        # self.sphere_verts_rgb = torch.full(
-        #     [1, verts_shape[0], 3], 0.5, requires_grad=True
-        # )
+        # Texture
         self.texture_image = torch.nn.Parameter(
             torch.zeros(512, 512, 3), requires_grad=True
         )
         self.register_buffer(
             "verts_uvs",
-            kwargs.get(
-                "verts_uvs", convert_3d_to_uv_coordinates(self.src_mesh.verts_packed())
-            ),
+            kwargs.get("verts_uvs", self.src_mesh.textures._verts_uvs_padded[0]),
         )
-        self.register_buffer(
-            "faces_uvs", kwargs.get("faces_uvs", self.src_mesh.faces_packed())
-        )
-        # self.register_buffer('fuv_idx', kwargs.get('fuv_idx', data.mesh_init_fuv_idx))
+        self.register_buffer("faces_uvs", self.src_mesh.textures._faces_uvs_padded[0])
 
-        self.lights = AmbientLights()  # suboptimal
+        # Rendering
+        self.lights = AmbientLights()  # suboptimal?
+
         rot, trans = look_at_view_transform(dist=5, elev=[0], azim=[0])
         camera = FoVPerspectiveCameras(
             device=self.device, R=rot[None, 0, ...], T=trans[None, 0, ...]
         )
 
-        # Rasterization settings for differentiable rendering, where the blur_radius
-        # initialization is based on Liu et al, 'Soft Rasterizer: A Differentiable
-        # Renderer for Image-based 3D Reasoning', ICCV 2019
         sigma = 1e-4
-        raster_settings_soft = RasterizationSettings(
-            image_size=128,
-            blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
-            faces_per_pixel=50,
-            perspective_correct=False,
-        )
 
         # Silhouette renderer
         self.renderer_silhouette = MeshRenderer(
             rasterizer=MeshRasterizer(
-                cameras=camera, raster_settings=raster_settings_soft
+                cameras=camera,
+                raster_settings=RasterizationSettings(
+                    image_size=128,
+                    blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
+                    faces_per_pixel=50,
+                    perspective_correct=False,
+                ),
             ),
             shader=SoftSilhouetteShader(),
         )
-        # Differentiable soft renderer using per vertex RGB colors for texture
+        # Differentiable soft renderer for texture
         self.renderer_textured = MeshRenderer(
             rasterizer=MeshRasterizer(
-                cameras=camera, raster_settings=raster_settings_soft
+                cameras=camera,
+                raster_settings=RasterizationSettings(
+                    image_size=128,
+                    blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
+                    faces_per_pixel=50,
+                    perspective_correct=False,
+                ),
             ),
             shader=SoftPhongShader(
-                device=self.device, cameras=camera, lights=self.lights
+                device=self.device,
+                cameras=camera,
+                lights=self.lights,
+                blend_params=BlendParams(
+                    sigma=1e-4, gamma=1e-4, background_color=(1, 1, 1.0)
+                ),
             ),
         )
 
-        # Optimize using rendered RGB image loss, rendered silhouette image loss, mesh
-        # edge loss, mesh normal consistency, and mesh laplacian smoothing
+        # Loss weights
         self.losses = {
             "rgb": {"weight": 1.0, "values": []},
             "silhouette": {"weight": 1.0, "values": []},
@@ -123,6 +121,22 @@ class TwinRunner(LightningModule):
             "normal": {"weight": 0.01, "values": []},
             "laplacian": {"weight": 1.0, "values": []},
         }
+
+        self.save_textured_mesh(self.out / "model_initial.obj")
+
+    def save_textured_mesh(self, path):
+        if self.mesh is not None:
+            final_verts, final_faces = self.mesh.get_mesh_verts_faces(0)
+        else:
+            final_verts, final_faces = self.src_mesh.get_mesh_verts_faces(0)
+        save_obj(
+            path,
+            verts=final_verts,
+            faces=final_faces,
+            verts_uvs=self.verts_uvs,
+            faces_uvs=self.faces_uvs,
+            texture_map=self.texture_image,
+        )
 
     @staticmethod
     def update_mesh_shape_prior_losses(mesh):
@@ -151,37 +165,38 @@ class TwinRunner(LightningModule):
 
     def training_step(self, batch: Dict[str, Tensor], batch_idx: int) -> Tensor:
         batch_size = batch["image"].size(0)
-        loss = {k: torch.tensor(0.0, device=self.device) for k in self.losses}
-        if batch_idx == 0:
-            # Deform the mesh
-            self.mesh = self.src_mesh.offset_verts(self.deform_verts)
+        losses_dict = {k: torch.tensor(0.0, device=self.device) for k in self.losses}
 
-            if self.current_epoch >= self.mesh_only_epochs:
-                # self.current_epoch == self.mesh_only_epochs:
-                #     TODO: recreate UV coords with blender
+        # Deform the mesh
+        self.mesh = self.src_mesh.offset_verts(self.deform_verts)
 
-                # Add per vertex colors to texture the mesh
-                # self.mesh.textures = TexturesVertex(
-                #     verts_features=self.sphere_verts_rgb
-                # )
+        if self.current_epoch >= self.mesh_only_epochs:
+            # self.current_epoch == self.mesh_only_epochs:
+            #     TODO: recreate UV coords with blender?
 
-                # https://github.com/facebookresearch/pytorch3d/issues/1473
-                self.mesh.textures = TexturesUV(
-                    maps=self.texture_image.unsqueeze(0),
-                    faces_uvs=self.faces_uvs.unsqueeze(0),
-                    verts_uvs=self.verts_uvs.unsqueeze(0),
-                )
+            # https://github.com/facebookresearch/pytorch3d/issues/1473
+            self.mesh.textures = TexturesUV(
+                maps=self.texture_image.unsqueeze(0),
+                faces_uvs=self.faces_uvs.unsqueeze(0),
+                verts_uvs=self.verts_uvs.unsqueeze(0),
+            )
 
-            # Losses to smooth /regularize the mesh shape
-            loss.update(**self.update_mesh_shape_prior_losses(self.mesh))
+        # Losses to smooth /regularize the mesh shape
+        losses_dict.update(**self.update_mesh_shape_prior_losses(self.mesh))
 
         meshes = self.mesh.extend(batch_size)
         cameras = FoVPerspectiveCameras(device=self.device, R=batch["R"], T=batch["T"])
-        if self.current_epoch < self.mesh_only_epochs:
-            images_predicted = self.renderer_silhouette(
-                meshes, cameras=cameras, lights=self.lights
-            )
-        else:
+
+        images_predicted = self.renderer_silhouette(
+            meshes, cameras=cameras, lights=self.lights
+        )
+        # # Squared L2 distance between the predicted silhouette and the target
+        # # silhouette from our dataset
+        predicted_silhouette = images_predicted[..., 3:]
+        loss_silhouette = ((predicted_silhouette - batch["silhouette"]) ** 2).mean()
+        losses_dict["silhouette"] += loss_silhouette
+
+        if self.current_epoch >= self.mesh_only_epochs:
             images_predicted = self.renderer_textured(
                 meshes, cameras=cameras, lights=self.lights
             )
@@ -189,15 +204,9 @@ class TwinRunner(LightningModule):
             # # image from our dataset
             predicted_rgb = images_predicted[..., :3]
             loss_rgb = ((predicted_rgb - batch["image"]) ** 2).mean()
-            loss["rgb"] += loss_rgb
+            losses_dict["rgb"] += loss_rgb
 
-        # # Squared L2 distance between the predicted silhouette and the target
-        # # silhouette from our dataset
-        predicted_silhouette = images_predicted[..., 3:]
-        loss_silhouette = ((predicted_silhouette - batch["silhouette"]) ** 2).mean()
-        loss["silhouette"] += loss_silhouette
-
-        final_loss = sum([l * self.losses[k]["weight"] for k, l in loss.items()])
+        final_loss = sum([l * self.losses[k]["weight"] for k, l in losses_dict.items()])
 
         # Plot mesh
         if batch_idx == 0 and self.current_epoch % 20 == 0:
@@ -214,15 +223,7 @@ class TwinRunner(LightningModule):
                 self.out / f"vis_{self.current_epoch}.png"
             )
 
-            final_verts, final_faces = self.mesh.get_mesh_verts_faces(0)
-            save_obj(
-                self.out / f"model_{self.current_epoch}.obj",
-                verts=final_verts,
-                faces=final_faces,
-                verts_uvs=self.verts_uvs,
-                faces_uvs=self.faces_uvs,
-                texture_map=255 * self.texture_image,
-            )
+            self.save_textured_mesh(self.out / f"model_{self.current_epoch}.obj")
 
         return final_loss
 

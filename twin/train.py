@@ -2,7 +2,6 @@
 Main train script
 """
 import torch
-from pytorch3d.io import save_obj
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, TQDMProgressBar
 
@@ -11,12 +10,17 @@ from twin.data.synthetic import Synthetic
 from twin.runner import TwinRunner
 
 
-def train(max_epochs=1000, seed=42):
+def train(max_epochs=5000, seed=42):
+    """
+    Fit textured mesh
+    :param max_epochs: number of epochs
+    :param seed: random state
+    """
     print("Training")
     seed_everything(seed, workers=True)
 
     datamodule = TwinDataModule(dataset_cl=Synthetic)
-    runner = TwinRunner(mesh_only_epochs=max_epochs // 2)
+    runner = TwinRunner(mesh_only_epochs=max_epochs // 4)
 
     callbacks = [
         LearningRateMonitor(),
@@ -37,15 +41,7 @@ def train(max_epochs=1000, seed=42):
     trainer.fit(runner, datamodule)
 
     # Save
-    final_verts, final_faces = runner.mesh.get_mesh_verts_faces(0)
-    save_obj(
-        "model.obj",
-        verts=final_verts,
-        faces=final_faces,
-        verts_uvs=runner.verts_uvs,
-        faces_uvs=runner.faces_uvs,
-        texture_map=255 * runner.texture_image,
-    )
+    runner.save_textured_mesh("model.obj")
 
 
 if __name__ == "__main__":
