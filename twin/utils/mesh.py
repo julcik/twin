@@ -59,13 +59,10 @@ def make_sphere(level: int = 1, device=None):
         device = torch.device("cpu")
     if level < 0:
         raise ValueError("level must be >= 0.")
-    if level == 1:
-        obj_filename = Path(__file__).parents[1] / "data" / "sphere" / "uvsphere.obj"
-    elif level == 2:
-        obj_filename = Path(__file__).parents[1] / "data" / "sphere" / "uvsphere2.obj"
-    else:
+    if level not in [1,2,3]:
         raise NotImplementedError
 
+    obj_filename = Path(__file__).parents[1] / "data" / "sphere" / f"uvsphere{'' if level==1 else str(level)}.obj"
     mesh = load_objs_as_meshes([obj_filename], device=device)
     verts, faces = mesh.get_mesh_verts_faces(0)
 
