@@ -23,15 +23,15 @@ from pytorch3d.renderer import (
     SoftSilhouetteShader,
     TexturesUV,
     TexturesVertex,
-    look_at_view_transform,
+    look_at_view_transform, BlendParams, PointLights,
 )
 from pytorch3d.structures import Meshes
-from pytorch3d.utils import ico_sphere
+from pytorch3d.utils import ico_sphere, checkerboard
 from pytorch_lightning import LightningModule
 from torch import Tensor
 from torch.optim import SGD, Optimizer
 
-from twin.utils.mesh import convert_3d_to_uv_coordinates
+from twin.utils.mesh import uv_unwrapping
 
 
 class TwinRunner(LightningModule):
@@ -67,50 +67,63 @@ class TwinRunner(LightningModule):
         #     [1, verts_shape[0], 3], 0.5, requires_grad=True
         # )
         self.texture_image = torch.nn.Parameter(
-            torch.zeros(512, 512, 3), requires_grad=True
+            # torch.zeros(512, 512, 3),
+            torch.tensor(np.kron([[1, 0] * 16, [0, 1] * 16] * 16, np.ones((16, 16)))).unsqueeze(-1).repeat((1,1,3)).float(),
+            requires_grad=True
         )
         self.register_buffer(
             "verts_uvs",
             kwargs.get(
-                "verts_uvs", convert_3d_to_uv_coordinates(self.src_mesh.verts_packed())
+                "verts_uvs", uv_unwrapping(self.src_mesh.verts_packed())
             ),
         )
         self.register_buffer(
             "faces_uvs", kwargs.get("faces_uvs", self.src_mesh.faces_packed())
         )
-        # self.register_buffer('fuv_idx', kwargs.get('fuv_idx', data.mesh_init_fuv_idx))
 
         self.lights = AmbientLights()  # suboptimal
+        # self.lights = PointLights(ambient_color=[[1.0, 1.0, 1.0]],
+        #     diffuse_color=[[0, 0, 0]],
+        #     specular_color=[[0, 0, 0]],
+        #     location=[[0, 0, 1.0]],).to(self.device)
+
         rot, trans = look_at_view_transform(dist=5, elev=[0], azim=[0])
         camera = FoVPerspectiveCameras(
             device=self.device, R=rot[None, 0, ...], T=trans[None, 0, ...]
         )
 
-        # Rasterization settings for differentiable rendering, where the blur_radius
-        # initialization is based on Liu et al, 'Soft Rasterizer: A Differentiable
-        # Renderer for Image-based 3D Reasoning', ICCV 2019
         sigma = 1e-4
-        raster_settings_soft = RasterizationSettings(
-            image_size=128,
-            blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
-            faces_per_pixel=50,
-            perspective_correct=False,
-        )
 
         # Silhouette renderer
         self.renderer_silhouette = MeshRenderer(
             rasterizer=MeshRasterizer(
-                cameras=camera, raster_settings=raster_settings_soft
+                cameras=camera,
+                raster_settings=RasterizationSettings(
+                    image_size=128,
+                    blur_radius=np.log(1. / 1e-4 - 1.)*sigma,
+                    faces_per_pixel=50,
+                    perspective_correct=False,
+)
             ),
             shader=SoftSilhouetteShader(),
         )
-        # Differentiable soft renderer using per vertex RGB colors for texture
+        # Differentiable soft renderer for texture
         self.renderer_textured = MeshRenderer(
             rasterizer=MeshRasterizer(
-                cameras=camera, raster_settings=raster_settings_soft
+                cameras=camera,
+                raster_settings=RasterizationSettings(
+                    image_size=128,
+                    blur_radius=np.log(1. / 1e-4 - 1.)*sigma,
+                    faces_per_pixel=50,
+                    perspective_correct=False,
+
+                )
             ),
             shader=SoftPhongShader(
-                device=self.device, cameras=camera, lights=self.lights
+                device=self.device,
+                cameras=camera,
+                lights=self.lights,
+                blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(1, 1, 1.0)),
             ),
         )
 
@@ -123,6 +136,16 @@ class TwinRunner(LightningModule):
             "normal": {"weight": 0.01, "values": []},
             "laplacian": {"weight": 1.0, "values": []},
         }
+
+        final_verts, final_faces = self.src_mesh.get_mesh_verts_faces(0)
+        save_obj(
+            self.out / "model_initial.obj",
+            verts=final_verts,
+            faces=final_faces,
+            verts_uvs=self.verts_uvs,
+            faces_uvs=self.faces_uvs,
+            texture_map=self.texture_image,
+        )
 
     @staticmethod
     def update_mesh_shape_prior_losses(mesh):
@@ -177,11 +200,17 @@ class TwinRunner(LightningModule):
 
         meshes = self.mesh.extend(batch_size)
         cameras = FoVPerspectiveCameras(device=self.device, R=batch["R"], T=batch["T"])
-        if self.current_epoch < self.mesh_only_epochs:
-            images_predicted = self.renderer_silhouette(
-                meshes, cameras=cameras, lights=self.lights
-            )
-        else:
+
+        images_predicted = self.renderer_silhouette(
+            meshes, cameras=cameras, lights=self.lights
+        )
+        # # Squared L2 distance between the predicted silhouette and the target
+        # # silhouette from our dataset
+        predicted_silhouette = images_predicted[..., 3:]
+        loss_silhouette = ((predicted_silhouette - batch["silhouette"]) ** 2).mean()
+        losses_dict["silhouette"] += loss_silhouette
+
+        if self.current_epoch >= self.mesh_only_epochs:
             images_predicted = self.renderer_textured(
                 meshes, cameras=cameras, lights=self.lights
             )
@@ -191,16 +220,10 @@ class TwinRunner(LightningModule):
             loss_rgb = ((predicted_rgb - batch["image"]) ** 2).mean()
             losses_dict["rgb"] += loss_rgb
 
-        # # Squared L2 distance between the predicted silhouette and the target
-        # # silhouette from our dataset
-        predicted_silhouette = images_predicted[..., 3:]
-        loss_silhouette = ((predicted_silhouette - batch["silhouette"]) ** 2).mean()
-        losses_dict["silhouette"] += loss_silhouette
-
         final_loss = sum([l * self.losses[k]["weight"] for k, l in losses_dict.items()])
 
         # Plot mesh
-        if batch_idx == 0 and self.current_epoch % 20 == 0:
+        if batch_idx == 0: # and self.current_epoch % 20 == 0:
             vis = self.visualize_prediction(
                 meshes,
                 cameras=cameras,
@@ -215,6 +238,14 @@ class TwinRunner(LightningModule):
             )
 
             final_verts, final_faces = self.mesh.get_mesh_verts_faces(0)
+            Image.fromarray(vis.cpu().numpy().astype(np.uint8)).show()
+            if self.mesh.textures is not None:
+                Image.fromarray(np.array(255 * self.mesh.textures._maps_padded[0].detach().cpu()).astype(np.uint8)).show()
+                Image.fromarray(np.array(255 * self.texture_image.detach().cpu()).astype(np.uint8)).show()
+                print(">>>>>",
+                      self.texture_image.detach().max(),
+                      np.array(255 * self.texture_image.detach().cpu()).astype(np.uint8).max(),
+                      (self.texture_image.detach() > 0.5).sum())
             save_obj(
                 self.out / f"model_{self.current_epoch}.obj",
                 verts=final_verts,

@@ -43,22 +43,18 @@ def prep_blender_uvunwrap(
     )
 
 
-def convert_3d_to_uv_coordinates(X: Tensor):
+def uv_unwrapping(X: Tensor):
     """
-    UV coordinates for sphere
-    X : N,3
-    Returns UV: N,2 normalized to [-1, 1]
-    U: Azimuth: Angle with +X [-pi,pi]
-    V: Inclination: Angle with +Z [0,pi]
+    UV unwrapping for sphere
+    https://en.wikipedia.org/wiki/UV_mapping
+    imply center is (0,0,0)
     """
-    eps = 1e-4
+    eps = 1e-8
     rad = torch.norm(X, dim=-1).clamp(min=eps)
-    theta = torch.acos(
-        (X[..., 2] / rad).clamp(min=-1 + eps, max=1 - eps)
-    )  # Inclination: Angle with +Z [0,pi]
-    phi = torch.atan2(X[..., 1], X[..., 0])  # Azimuth: Angle with +X [-pi,pi]
-    vv = (theta / np.pi) * 2 - 1
-    uu = ((phi + np.pi) / (2 * np.pi)) * 2 - 1
-    uv = torch.stack([uu, vv], dim=-1)
+    print(rad.shape, X.shape)
+    unit = X / rad[...,None]
+    u = torch.atan2(unit[...,2], unit[...,0])/(2 * np.pi)
+    v = torch.asin(unit[...,1])/ np.pi
+    uv = torch.stack([u, v], dim=-1)
 
     return uv

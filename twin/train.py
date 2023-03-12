@@ -11,12 +11,12 @@ from twin.data.synthetic import Synthetic
 from twin.runner import TwinRunner
 
 
-def train(max_epochs=1000, seed=42):
+def train(max_epochs=20, seed=42):
     print("Training")
     seed_everything(seed, workers=True)
 
     datamodule = TwinDataModule(dataset_cl=Synthetic)
-    runner = TwinRunner(mesh_only_epochs=max_epochs // 2)
+    runner = TwinRunner(mesh_only_epochs=0 ) #max_epochs // 4)
 
     callbacks = [
         LearningRateMonitor(),
