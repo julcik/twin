@@ -1,8 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+"""
+Visualisation
+"""
 
 import matplotlib.pyplot as plt
 
@@ -12,7 +10,6 @@ def image_grid(
     rows=None,
     cols=None,
     fill: bool = True,
-    show_axes: bool = False,
     rgb: bool = True,
 ):
     """
@@ -42,12 +39,11 @@ def image_grid(
     bleed = 0
     fig.subplots_adjust(left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed))
 
-    for ax, im in zip(axarr.ravel(), images):
+    for axis, image in zip(axarr.ravel(), images):
         if rgb:
             # only render RGB channels
-            ax.imshow(im[..., :3])
+            axis.imshow(image[..., :3])
         else:
             # only render Alpha channel
-            ax.imshow(im[..., -1])
-        if not show_axes:
-            ax.set_axis_off()
+            axis.imshow(image[..., -1])
+        axis.set_axis_off()

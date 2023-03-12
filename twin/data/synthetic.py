@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
 from matplotlib import pyplot as plt
+from PIL import Image
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.renderer import (
     FoVPerspectiveCameras,
@@ -129,7 +129,9 @@ class Synthetic(Dataset):
 
 if __name__ == "__main__":
     dataset = Synthetic(data_dir="./data", obj_filename="cow_mesh/cow.obj")
-    Image.fromarray(np.array(255*dataset.mesh.textures._maps_padded[0]).astype(np.uint8)).show()
+    Image.fromarray(
+        np.array(255 * dataset.mesh.textures._maps_padded[0]).astype(np.uint8)
+    ).show()
 
     it = iter(dataset)
 
