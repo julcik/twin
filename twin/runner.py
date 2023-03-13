@@ -23,22 +23,23 @@ from pytorch3d.renderer import (
     SoftPhongShader,
     SoftSilhouetteShader,
     TexturesUV,
-    look_at_view_transform,
+    look_at_view_transform, HardPhongShader, PointLights,
 )
 from pytorch3d.structures import Meshes
 from pytorch_lightning import LightningModule
 from torch import Tensor
-from torch.optim import SGD, Optimizer
+from torch.optim import SGD, Optimizer, Adam
 
 from twin.utils.mesh import make_sphere
-
+from torchvision.transforms import functional as ttf
+from torch.nn import functional as F
 
 class TwinRunner(LightningModule):
     """
     Lightning module which describes training process
     """
 
-    def __init__(self, init_shape_level=2, mesh_only_epochs=5, out="./out", **kwargs):
+    def __init__(self, init_shape_level=3, mesh_only_epochs=5, out="./out", device="cpu", **kwargs):
         """
 
         :param args:
@@ -50,7 +51,7 @@ class TwinRunner(LightningModule):
         self.mesh_only_epochs = mesh_only_epochs
 
         # Initial mesh - UV sphere
-        self.src_mesh = make_sphere(level=init_shape_level)
+        self.src_mesh = make_sphere(level=init_shape_level, device=device)
         verts_shape = self.src_mesh.verts_packed().shape
 
         # Deformed mesh
@@ -61,7 +62,7 @@ class TwinRunner(LightningModule):
 
         # Texture
         self.texture_image = torch.nn.Parameter(
-            torch.zeros(512, 512, 3), requires_grad=True
+            torch.full((512, 512, 3), fill_value=0.5), requires_grad=True
         )
         self.register_buffer(
             "verts_uvs",
@@ -70,7 +71,9 @@ class TwinRunner(LightningModule):
         self.register_buffer("faces_uvs", self.src_mesh.textures._faces_uvs_padded[0])
 
         # Rendering
-        self.lights = AmbientLights()  # suboptimal?
+        # self.lights = AmbientLights().to(device) # suboptimal?
+        self.lights_location = torch.nn.Parameter(torch.tensor([[5.0, 5.0, -5.0]], device=device), requires_grad=True)
+        self.lights = PointLights(device=device, location=self.lights_location)
 
         rot, trans = look_at_view_transform(dist=5, elev=[0], azim=[0])
         camera = FoVPerspectiveCameras(
@@ -91,15 +94,17 @@ class TwinRunner(LightningModule):
                 ),
             ),
             shader=SoftSilhouetteShader(),
-        )
-        # Differentiable soft renderer for texture
+        ).to(device)
+        # Differentiable renderer for texture
+
+        blur = 1.e-6 #5.e-5 # TODO: decay?
         self.renderer_textured = MeshRenderer(
             rasterizer=MeshRasterizer(
                 cameras=camera,
                 raster_settings=RasterizationSettings(
                     image_size=128,
-                    blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
-                    faces_per_pixel=50,
+                    blur_radius=blur,
+                    faces_per_pixel=5,
                     perspective_correct=False,
                 ),
             ),
@@ -108,14 +113,14 @@ class TwinRunner(LightningModule):
                 cameras=camera,
                 lights=self.lights,
                 blend_params=BlendParams(
-                    sigma=1e-4, gamma=1e-4, background_color=(1, 1, 1.0)
+                    sigma=blur, gamma=1e-4, background_color=(1.0, 1.0, 1.0)
                 ),
             ),
-        )
+        ).to(device)
 
         # Loss weights
         self.losses = {
-            "rgb": {"weight": 1.0, "values": []},
+            "rgb": {"weight": 10.0, "values": []},
             "silhouette": {"weight": 1.0, "values": []},
             "edge": {"weight": 1.0, "values": []},
             "normal": {"weight": 0.01, "values": []},
@@ -135,7 +140,7 @@ class TwinRunner(LightningModule):
             faces=final_faces,
             verts_uvs=self.verts_uvs,
             faces_uvs=self.faces_uvs,
-            texture_map=self.texture_image,
+            texture_map=F.sigmoid(10*self.texture_image),
         )
 
     @staticmethod
@@ -159,7 +164,8 @@ class TwinRunner(LightningModule):
     def configure_optimizers(
         self,
     ) -> Union[Tuple[List[Optimizer], List[Dict[str, Any]]], Optimizer]:
-        optimizer = SGD([self.deform_verts, self.texture_image], lr=1.0, momentum=0.9)
+        # optimizer = SGD([self.deform_verts, self.texture_image], lr=1.0, momentum=0.9)
+        optimizer = Adam([self.deform_verts, self.texture_image, self.lights_location], lr=0.01,)
         # TODO: scheduler
         return optimizer
 
@@ -170,16 +176,7 @@ class TwinRunner(LightningModule):
         # Deform the mesh
         self.mesh = self.src_mesh.offset_verts(self.deform_verts)
 
-        if self.current_epoch >= self.mesh_only_epochs:
-            # self.current_epoch == self.mesh_only_epochs:
-            #     TODO: recreate UV coords with blender?
 
-            # https://github.com/facebookresearch/pytorch3d/issues/1473
-            self.mesh.textures = TexturesUV(
-                maps=self.texture_image.unsqueeze(0),
-                faces_uvs=self.faces_uvs.unsqueeze(0),
-                verts_uvs=self.verts_uvs.unsqueeze(0),
-            )
 
         # Losses to smooth /regularize the mesh shape
         losses_dict.update(**self.update_mesh_shape_prior_losses(self.mesh))
@@ -197,6 +194,23 @@ class TwinRunner(LightningModule):
         losses_dict["silhouette"] += loss_silhouette
 
         if self.current_epoch >= self.mesh_only_epochs:
+            if self.current_epoch <= 2*self.mesh_only_epochs and batch_idx == 0:
+                with torch.no_grad():
+                    self.texture_image.data = ttf.gaussian_blur(self.texture_image.moveaxis(-1,0), (5,5), (3,3)).moveaxis(0,-1)
+
+            # do not try to deform mesh to match texture, detach
+            self.mesh = self.src_mesh.offset_verts(self.deform_verts.detach())
+
+            # https://github.com/facebookresearch/pytorch3d/issues/1473
+            self.mesh.textures = TexturesUV(
+                # to speedup texture training
+                maps=F.sigmoid(10*self.texture_image.unsqueeze(0)),
+                faces_uvs=self.faces_uvs.unsqueeze(0),
+                verts_uvs=self.verts_uvs.unsqueeze(0),
+            )
+
+            meshes = self.mesh.extend(batch_size)
+
             images_predicted = self.renderer_textured(
                 meshes, cameras=cameras, lights=self.lights
             )
@@ -206,10 +220,12 @@ class TwinRunner(LightningModule):
             loss_rgb = ((predicted_rgb - batch["image"]) ** 2).mean()
             losses_dict["rgb"] += loss_rgb
 
+        self.log_dict(losses_dict)
         final_loss = sum([l * self.losses[k]["weight"] for k, l in losses_dict.items()])
 
         # Plot mesh
         if batch_idx == 0 and self.current_epoch % 20 == 0:
+            print("self.lights_location",self.lights_location)
             vis = self.visualize_prediction(
                 meshes,
                 cameras=cameras,

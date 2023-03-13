@@ -10,24 +10,25 @@ from twin.data.synthetic import Synthetic
 from twin.runner import TwinRunner
 
 
-def train(max_epochs=5000, seed=42):
+def train(max_epochs=500, seed=42, batch_size=4):
     """
     Fit textured mesh
     :param max_epochs: number of epochs
     :param seed: random state
     """
     print("Training")
+    use_cuda = torch.cuda.is_available()
     seed_everything(seed, workers=True)
 
-    datamodule = TwinDataModule(dataset_cl=Synthetic)
-    runner = TwinRunner(mesh_only_epochs=max_epochs // 4)
+    datamodule = TwinDataModule(dataset_cl=Synthetic, batch_size=batch_size, num_workers=8)
+    runner = TwinRunner(mesh_only_epochs=max_epochs // 20, device="cuda" if use_cuda else "cpu")
 
     callbacks = [
         LearningRateMonitor(),
         # ModelCheckpoint(),
         TQDMProgressBar(refresh_rate=20),
     ]
-    use_cuda = torch.cuda.is_available()
+
     trainer_params = {
         "accelerator": "gpu" if use_cuda else "cpu",
         "benchmark": False,
