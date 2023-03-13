@@ -15,31 +15,38 @@ class Images(Dataset):
     Dataset from images folder and COLMAP camera estimations
     """
 
-    def __init__(self, data_dir="./data/milk", size=512, device="cpu") -> None:
+    def __init__(self, data_dir="./data/milk", size=128) -> None:
         """
 
         :param data_dir:
         :param device:
         """
         data_dir = Path(data_dir)
-        with open(data_dir / "transforms.json", "r") as fp:
-            meta = json.load(fp)
+        with open(data_dir / "transforms.json", "r") as file:
+            meta = json.load(file)
 
         self.size = size
         self.samples = []
 
-        centre = torch.zeros(3)  # ???
-        for frame in meta["frames"]:
-            fname = data_dir / frame["file_path"]
-            transform = frame["transform_matrix"]
+        fov = meta["camera"]["angle_x"]
+        # focal = 1 / torch.tan(fov)
+        self.camera_params = {"fov": fov, "degrees": False}
+        # TODO: more params + if not square
 
-            rotation = transform[:, :3, :3]
-            translation = transform[:, :3, 3] + rotation @ centre
+        for frame in meta["frames"]:
+            fname = (data_dir / frame["file_path"]).with_suffix(".png")
+            transform = torch.from_numpy(np.array(frame["transform_matrix"])).float()
+
+            rotation = transform[:3, :3].t()
+            translation = transform[:3, 3:4]
+            translation = (-rotation @ translation).squeeze(-1)
+            rotation[[0, 2], :] *= -1
+            translation[[0, 2]] *= -1
 
             self.samples.append(
                 {
                     "image": fname,
-                    "R": rotation,
+                    "R": rotation.t(),
                     "T": translation,
                 }
             )

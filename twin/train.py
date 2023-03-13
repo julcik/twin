@@ -6,11 +6,12 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, TQDMProgressBar
 
 from twin.data.datamodule import TwinDataModule
+from twin.data.images import Images
 from twin.data.synthetic import Synthetic
 from twin.runner import TwinRunner
 
 
-def train(max_epochs=5000, seed=42):
+def train(max_epochs=500, seed=42):
     """
     Fit textured mesh
     :param max_epochs: number of epochs
@@ -19,13 +20,16 @@ def train(max_epochs=5000, seed=42):
     print("Training")
     seed_everything(seed, workers=True)
 
-    datamodule = TwinDataModule(dataset_cl=Synthetic)
-    runner = TwinRunner(mesh_only_epochs=max_epochs // 4)
+    datamodule = TwinDataModule(dataset_cl=Images)
+    camera_params = datamodule.dataset_cl().camera_params
+    runner = TwinRunner(
+        mesh_only_epochs=max_epochs // 4, size=128, camera_params=camera_params
+    )
 
     callbacks = [
         LearningRateMonitor(),
         # ModelCheckpoint(),
-        TQDMProgressBar(refresh_rate=20),
+        TQDMProgressBar(refresh_rate=1),
     ]
     use_cuda = torch.cuda.is_available()
     trainer_params = {

@@ -38,7 +38,16 @@ class TwinRunner(LightningModule):
     Lightning module which describes training process
     """
 
-    def __init__(self, init_shape_level=2, mesh_only_epochs=5, out="./out", **kwargs):
+    def __init__(
+        self,
+        init_shape_level=3,
+        mesh_only_epochs=5,
+        out="./out",
+        size=128,
+        camera_params=None,
+        **kwargs,
+    ):
+        # pylint: disable=too-many-instance-attributes, too-many-arguments
         """
 
         :param args:
@@ -48,6 +57,7 @@ class TwinRunner(LightningModule):
         self.out = Path(out)
         self.out.mkdir(exist_ok=True)
         self.mesh_only_epochs = mesh_only_epochs
+        self.camera_params = {} if camera_params is None else camera_params
 
         # Initial mesh - UV sphere
         self.src_mesh = make_sphere(level=init_shape_level)
@@ -74,7 +84,10 @@ class TwinRunner(LightningModule):
 
         rot, trans = look_at_view_transform(dist=5, elev=[0], azim=[0])
         camera = FoVPerspectiveCameras(
-            device=self.device, R=rot[None, 0, ...], T=trans[None, 0, ...]
+            device=self.device,
+            R=rot[None, 0, ...],
+            T=trans[None, 0, ...],
+            **self.camera_params,
         )
 
         sigma = 1e-4
@@ -84,7 +97,7 @@ class TwinRunner(LightningModule):
             rasterizer=MeshRasterizer(
                 cameras=camera,
                 raster_settings=RasterizationSettings(
-                    image_size=128,
+                    image_size=size,
                     blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
                     faces_per_pixel=50,
                     perspective_correct=False,
@@ -97,7 +110,7 @@ class TwinRunner(LightningModule):
             rasterizer=MeshRasterizer(
                 cameras=camera,
                 raster_settings=RasterizationSettings(
-                    image_size=128,
+                    image_size=size,
                     blur_radius=np.log(1.0 / 1e-4 - 1.0) * sigma,
                     faces_per_pixel=50,
                     perspective_correct=False,
@@ -185,7 +198,9 @@ class TwinRunner(LightningModule):
         losses_dict.update(**self.update_mesh_shape_prior_losses(self.mesh))
 
         meshes = self.mesh.extend(batch_size)
-        cameras = FoVPerspectiveCameras(device=self.device, R=batch["R"], T=batch["T"])
+        cameras = FoVPerspectiveCameras(
+            device=self.device, R=batch["R"], T=batch["T"], **self.camera_params
+        )
 
         images_predicted = self.renderer_silhouette(
             meshes, cameras=cameras, lights=self.lights

@@ -1,54 +1,13 @@
 """
 Mesh related utils
 """
-import logging
-import os
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 import torch
-from pytorch3d.io import load_obj, load_objs_as_meshes, save_obj
+from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.structures import Meshes
 from torch import Tensor
-
-
-def prep_blender_uvunwrap(
-    verts: Tensor,
-    faces: Tensor,
-    simplify: bool = False,
-) -> Tuple[Meshes, Tensor, Tensor]:
-    """Preprocess marching-cubed mesh with blender to reduce resolution, find uv-mapping
-    https://github.com/shubham-goel/ds/blob/2ef898894abb33c82e73790eedf30995ddc9d1c1/src/data/init_shape.py
-    """
-    if verts.shape[0] == 0 or faces.shape[0] == 0:
-        logging.warning(
-            f"Got zero sized inputs: {list(verts.shape)} {list(faces.shape)}"
-        )
-    device = verts.device
-    finp = os.path.join(os.getcwd(), "blender-uvunwrap.obj")
-    fout = os.path.join(os.getcwd(), "blender-uvunwrap-uv.obj")
-    logging.info(f"Saving mesh to {finp}")
-    save_obj(finp, verts, faces, decimal_places=10)
-
-    blender_unwrap_file = Path(__file__).parents[2] / "scripts" / "blender_unwrap.py"
-
-    blender_call_cmd = (
-        f"blender -b -P {blender_unwrap_file} -- {finp} {fout} {simplify} "
-        f"> prep_blender_uvunwrap.out 2>&1"
-    )
-    logging.info(f"Calling blender: {blender_call_cmd}")
-    if os.system(blender_call_cmd) != 0:
-        raise ChildProcessError("Blender preprocessing falied")
-    logging.info("done.")
-
-    verts, faces, aux = load_obj(fout)
-    logging.info(f"loaded mesh: v{list(verts.shape)} f{list(faces.verts_idx.shape)}")
-    return (
-        Meshes(verts[None].to(device), faces.verts_idx[None].to(device)),
-        aux.verts_uvs.to(device) if aux.verts_uvs is not None else None,
-        faces.textures_idx.to(device) if faces.textures_idx is not None else None,
-    )
 
 
 def make_sphere(level: int = 1, device=None):
@@ -59,10 +18,15 @@ def make_sphere(level: int = 1, device=None):
         device = torch.device("cpu")
     if level < 0:
         raise ValueError("level must be >= 0.")
-    if level not in [1,2,3]:
+    if level not in [1, 2, 3]:
         raise NotImplementedError
 
-    obj_filename = Path(__file__).parents[1] / "data" / "sphere" / f"uvsphere{'' if level==1 else str(level)}.obj"
+    obj_filename = (
+        Path(__file__).parents[1]
+        / "data"
+        / "sphere"
+        / f"uvsphere{'' if level==1 else str(level)}.obj"
+    )
     mesh = load_objs_as_meshes([obj_filename], device=device)
     verts, faces = mesh.get_mesh_verts_faces(0)
 
