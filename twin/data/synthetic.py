@@ -50,6 +50,7 @@ class Synthetic(Dataset):
         scale = max((verts - center).abs().max(0)[0])
         self.mesh.offset_verts_(-center)
         self.mesh.scale_verts_((1.0 / float(scale)))
+        self.camera_params = None
 
         # Get a batch of viewing angles.
         elev = torch.linspace(0, 360, num_views)
@@ -126,10 +127,11 @@ class Synthetic(Dataset):
 
 
 if __name__ == "__main__":
+
     dataset = Synthetic(data_dir="./data", obj_filename="cow_mesh/cow.obj")
-    Image.fromarray(
-        np.array(255 * dataset.mesh.textures._maps_padded[0]).astype(np.uint8)
-    ).show()
+    # Image.fromarray(
+    #     np.array(255 * dataset.mesh.textures._maps_padded[0]).astype(np.uint8)
+    # ).show()
 
     it = iter(dataset)
 
