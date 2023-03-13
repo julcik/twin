@@ -16,7 +16,7 @@ from pytorch3d.renderer import (
     RasterizationSettings,
     SoftPhongShader,
     SoftSilhouetteShader,
-    look_at_view_transform,
+    look_at_view_transform, AmbientLights,
 )
 from torch.utils.data import Dataset
 
@@ -29,7 +29,7 @@ class Synthetic(Dataset):
     """
 
     def __init__(
-        self, obj_filename="cow_mesh/cow.obj", data_dir="./data", device="cpu"
+        self, obj_filename="cow_mesh/cow.obj", data_dir="./data", device="cpu", num_views = 20
     ) -> None:
         """
 
@@ -52,9 +52,6 @@ class Synthetic(Dataset):
         self.mesh.scale_verts_((1.0 / float(scale)))
         self.camera_params = None
 
-        # the number of different viewpoints from which we want to render the mesh.
-        num_views = 20
-
         # Get a batch of viewing angles.
         elev = torch.linspace(0, 360, num_views)
         azim = torch.linspace(-180, 180, num_views)
@@ -62,6 +59,7 @@ class Synthetic(Dataset):
         # Place a point light in front of the object. As mentioned above, the front of
         # the cow is facing the -z direction.
         self.lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
+        # self.lights = AmbientLights().to(device)
 
         # Initialize an OpenGL perspective camera that represents a batch of different
         # viewing angles. All the cameras helper methods support mixed type inputs and
